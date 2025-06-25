@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exargs"
-version = "0.1.0"
+version = "0.1.1"
 description = "A configurable resolver supporting variables and dependency analysis"
 authors = [
   {name = "Qiaoy", email = "qiaoy@buaa.edu.cn"}
 ]
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.7"
 dependencies = [
   "pyyaml"
