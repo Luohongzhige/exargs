@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exargs-qiaoy"
-version = "0.2.1"
+version = "0.2.2"
 description = "A configurable resolver supporting variables and dependency analysis"
 authors = [
   {name = "Qiaoy", email = "qiaoy@buaa.edu.cn"}
