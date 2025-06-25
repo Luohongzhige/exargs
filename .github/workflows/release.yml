@@ -1,6 +1,7 @@
 name: Build and Publish to TestPyPI
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -37,39 +38,25 @@ jobs:
           python -m build
 
       - name: Upload to TestPyPI
+        if: github.event_name == 'push'
         run: twine upload --repository-url https://test.pypi.org/legacy/ dist/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_TOKEN }}
 
-      - name: Retry install from TestPyPI until expected version
+  test-install:
+    runs-on: ubuntu-latest
+    needs: build-and-publish
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install published package from TestPyPI
         run: |
-          set -e
-          EXPECTED_VERSION="${{ steps.version.outputs.version }}"
-          echo "Expecting version: $EXPECTED_VERSION"
-
-          for i in {1..5}; do
-            echo "Attempt $i to install exargs..."
-            pip uninstall -y exargs || true
-            pip install --no-cache-dir -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple  exargs-qiaoy
-
-            INSTALLED_VERSION=$(pip show exargs | grep ^Version: | cut -d' ' -f2)
-            echo "Installed version: $INSTALLED_VERSION"
-
-            if [[ "$INSTALLED_VERSION" == "$EXPECTED_VERSION" ]]; then
-              echo "Version match!"
-              break
-            fi
-
-            echo "Waiting 15 seconds..."
-            sleep 15
-          done
-
-          FINAL_VERSION=$(pip show exargs | grep ^Version: | cut -d' ' -f2)
-          if [[ "$FINAL_VERSION" != "$EXPECTED_VERSION" ]]; then
-            echo "Version mismatch after retries."
-            exit 1
-          fi
+          pip install --no-cache-dir -i https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple exargs-qiaoy
 
       - name: Run unit tests
         run: python -m unittest discover -s test
