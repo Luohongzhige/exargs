@@ -51,7 +51,7 @@ jobs:
           for i in {1..5}; do
             echo "Attempt $i to install exargs..."
             pip uninstall -y exargs || true
-            pip install --no-cache-dir -i https://test.pypi.org/simple/ exargs-qiaoy
+            pip install --no-cache-dir -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple  exargs-qiaoy
 
             INSTALLED_VERSION=$(pip show exargs | grep ^Version: | cut -d' ' -f2)
             echo "Installed version: $INSTALLED_VERSION"
