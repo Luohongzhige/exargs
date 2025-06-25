@@ -1,0 +1,4 @@
+data_dir: "/home/user/data"
+model_name: "resnet50"
+train_file: "${data_dir}/train.json"
+val_file: "${data_dir}/val.json"
