@@ -2,7 +2,7 @@ import unittest
 import tempfile
 import yaml
 import os
-from work.exargs import ConfigResolver
+from exargs import ConfigResolver
 
 class TestConfigResolver(unittest.TestCase):
 

@@ -2,7 +2,7 @@ import unittest
 import tempfile
 import yaml
 import os
-from work.exargs import ConfigResolver
+from exargs import ConfigResolver
 
 class TestConfigResolverAddVariable(unittest.TestCase):
     def _write_temp_yaml(self, content: dict) -> str:
