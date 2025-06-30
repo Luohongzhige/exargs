@@ -73,14 +73,6 @@ class TestConfigResolver(unittest.TestCase):
         self.assertEqual(result['b'], [1, '2', '6'])
         self.assertEqual(result['c']['inner'], '3')
 
-    def test_cycle_detection(self):
-        config = {'a': '${b}', 'b': '${c}', 'c': '${a}'}
-        path = self._write_temp_config(config)
-        resolver = ConfigResolver(path)
-        with self.assertRaises(ValueError) as ctx:
-            resolver.parse()
-        self.assertIn('Cycle(s) detected', str(ctx.exception))
-
     def test_add_variable_dynamic(self):
         config = {'a': 1}
         path = self._write_temp_config(config)

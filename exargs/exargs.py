@@ -7,7 +7,7 @@ import operator as op
 from collections import defaultdict
 from typing import Any
 
-# 安全运算符和函数
+# ----------------------------- 常量 -----------------------------
 SAFE_OPERATORS = {
     ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv,
     ast.Mod: op.mod, ast.Pow: op.pow,
@@ -20,13 +20,29 @@ SAFE_FUNCTIONS = {
     'min': min, 'max': max, 'abs': abs, 'int': int, 'float': float, 'bool': bool
 }
 
+# ----------------------------- 表达式求值 -----------------------------
+
 def _preprocess_expr(expr: str) -> str:
-    """将表达式中的“&&/||/^”转为 Python 可识别形式。"""
+    """将表达式中的“&& / || / ^”替换为 Python 语法可识别形式。"""
     expr = expr.strip()
     expr = re.sub(r"&&", " and ", expr)
     expr = re.sub(r"\|\|", " or ", expr)
-    # 逻辑异或：使用"^"保留为按位异或 (int/bool 都适用)
     return expr
+
+
+def _build_attr_path(node: ast.Attribute) -> str:
+    """把 Attribute 节点链拼成 cache.all.style → "cache.all.style"""
+    parts = []
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if isinstance(cur, ast.Name):
+        parts.append(cur.id)
+    else:
+        raise ValueError("Unsupported attribute chain")
+    return ".".join(reversed(parts))
+
 
 def _eval_expr(expr: str, local_vars: dict):
     expr = _preprocess_expr(expr)
@@ -41,7 +57,17 @@ def _eval_expr(expr: str, local_vars: dict):
                 return local_vars[node.id]
             if node.id in os.environ:
                 return os.environ[node.id]
-            raise KeyError(f"{node.id}")
+            raise KeyError(node.id)
+        elif isinstance(node, ast.Attribute):
+            dotted = _build_attr_path(node)
+            if dotted in local_vars:
+                return local_vars[dotted]
+            # 尝试逐层解析 dict 对象
+            base_val = _eval(node.value)
+            if isinstance(base_val, dict):
+                if node.attr in base_val:
+                    return base_val[node.attr]
+            raise KeyError(dotted)
         elif isinstance(node, ast.BinOp):
             return SAFE_OPERATORS[type(node.op)](_eval(node.left), _eval(node.right))
         elif isinstance(node, ast.UnaryOp):
@@ -75,9 +101,10 @@ def _eval_expr(expr: str, local_vars: dict):
         raise ValueError(f"Error evaluating expression '{expr}': {e}")
 
 
+# ----------------------------- 主类 -----------------------------
 class ConfigResolver:
-    VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
-    EXPR_PATTERN = re.compile(r"\$\{\{([^}]+)\}\}")
+    VAR_PATTERN = re.compile(r"\$\{(?!\{)([^}]+)\}")  # 排除 ${{ 表达式占位
+    EXPR_PATTERN = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 
     def __init__(self, config_path: str):
         self.config_path = config_path
@@ -86,58 +113,64 @@ class ConfigResolver:
         self.dependencies = self._extract_dependencies()
         self.resolved = None
 
+    # ------------------------- 公开接口 -------------------------
     def parse(self):
         order = self._topo_sort_with_cycle_check()
-        # 确保所有 flat_config 的 key 都在顺序中（即便没有依赖）
-        for key in self.flat_config:
-            if key not in order:
-                order.append(key)
+        # include all flat keys
+        for k in self.flat_config:
+            if k not in order:
+                order.append(k)
 
         resolved = {}
         for key in order:
             if key not in self.flat_config:
-                # 仅在 flat_config 不存在时跳过（可能是纯引用变量，比如环境变量）
                 continue
-            value = self.flat_config[key]
-            resolved[key] = self._resolve_value_recursively(value, resolved)
-
+            resolved[key] = self._resolve_value_recursively(self.flat_config[key], resolved)
         self.resolved = resolved
         return self._unflatten(resolved)
 
+    def add_variable(self, key: str, value: Any):
+        if not isinstance(key, str):
+            raise TypeError("Key must be a string")
+        self.flat_config[key] = value
+        self.dependencies = self._extract_dependencies()
+        return self.parse()
+
+    # ----------------------- 内部解析逻辑 -----------------------
     def _resolve_value_recursively(self, value, resolved):
         if isinstance(value, list):
             return [self._resolve_value_recursively(v, resolved) for v in value]
         if isinstance(value, dict):
             return {k: self._resolve_value_recursively(v, resolved) for k, v in value.items()}
 
+        # 变量替换先行
+        def substitute_vars(val):
+            prev = None
+            while isinstance(val, str) and self.VAR_PATTERN.search(val):
+                if val == prev:
+                    raise ValueError(f"Unresolved variables remain in value: {val}")
+                prev = val
+                for var in self.VAR_PATTERN.findall(val):
+                    if var in resolved:
+                        v = resolved[var]
+                    elif var in self.flat_config:
+                        v = self._resolve_value_recursively(self.flat_config[var], resolved)
+                        resolved[var] = v
+                    elif var in os.environ:
+                        v = os.environ[var]
+                    else:
+                        raise ValueError(f"Unresolved variable: {var}")
+                    val = val.replace(f"${{{var}}}", str(v))
+            return val
+
+        value = substitute_vars(value)
+
         # 表达式求值
         if isinstance(value, str) and self.EXPR_PATTERN.search(value):
-            def repl_expr(match):
-                expr = match.group(1)
-                return str(_eval_expr(expr, resolved))
-            value = self.EXPR_PATTERN.sub(repl_expr, value)
-            return value
-
-        # 变量替换
-        previous_value = None
-        while isinstance(value, str) and self.VAR_PATTERN.search(value):
-            if value == previous_value:
-                raise ValueError(f"Unresolved variables remain in value: {value}")
-            previous_value = value
-            for var in self.VAR_PATTERN.findall(value):
-                if var in resolved:
-                    var_value = resolved[var]
-                elif var in self.flat_config:
-                    var_value = self._resolve_value_recursively(self.flat_config[var], resolved)
-                    resolved[var] = var_value
-                elif var in os.environ:
-                    var_value = os.environ[var]
-                else:
-                    raise ValueError(f"Unresolved variable: {var}")
-                value = value.replace(f"${{{var}}}", str(var_value))
+            value = self.EXPR_PATTERN.sub(lambda m: str(_eval_expr(m.group(1), resolved)), value)
         return value
 
-    # ----------------------------- 工具函数 -----------------------------
+    # ----------------------- 工具函数 -----------------------
     def _load_config(self):
         with open(self.config_path, 'r') as f:
             if self.config_path.endswith(('.yaml', '.yml')):
@@ -147,7 +180,7 @@ class ConfigResolver:
             else:
                 raise ValueError("Only .yaml, .yml, or .json files are supported.")
 
-    def _flatten(self, d, parent_key='', sep='.'):
+    def _flatten(self, d, parent_key='', sep='.'):  # dict → flat
         items = {}
         for k, v in d.items():
             new_key = f"{parent_key}{sep}{k}" if parent_key else k
@@ -157,64 +190,55 @@ class ConfigResolver:
                 items[new_key] = v
         return items
 
-    def _unflatten(self, d, sep='.'):
+    def _unflatten(self, d, sep='.'):  # flat → nested
         result = {}
         for k, v in d.items():
             keys = k.split(sep)
-            target = result
-            for key in keys[:-1]:
-                target = target.setdefault(key, {})
-            target[keys[-1]] = v
+            tgt = result
+            for sub in keys[:-1]:
+                tgt = tgt.setdefault(sub, {})
+            tgt[keys[-1]] = v
         return result
 
     def _extract_dependencies(self):
         deps = defaultdict(set)
+        dotted_name_re = r"[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*"
 
-        for key, value in self.flat_config.items():
-            if isinstance(value, str):
-                deps[key].update(self.VAR_PATTERN.findall(value))
-                for expr in self.EXPR_PATTERN.findall(value):
-                    vars_in_expr = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", expr)
-                    deps[key].update(vars_in_expr)
+        for key, val in self.flat_config.items():
+            if isinstance(val, str):
+                deps[key].update(self.VAR_PATTERN.findall(val))
+                for expr in self.EXPR_PATTERN.findall(val):
+                    deps[key].update(re.findall(dotted_name_re, expr))
 
-        # 确保所有被引用的变量都在图中
         all_nodes = set(deps.keys()).union(*deps.values()) if deps else set()
-        for node in all_nodes:
-            deps.setdefault(node, set())
-
+        for n in all_nodes:
+            deps.setdefault(n, set())
         return deps
 
     def _topo_sort_with_cycle_check(self):
-        visited = {}
-        order = []
-        has_cycle = []
+        """拓扑排序 + 循环检测。返回解析顺序（依赖优先）。"""
+        visited: dict[str, int] = {}
+        order: list[str] = []
+        cycles: list[list[str]] = []
 
-        def dfs(node, path):
-            if visited.get(node, 0) == 1:
-                has_cycle.append(path + [node])
+        def dfs(node: str, path: list[str]):
+            if visited.get(node) == 1:  # 灰 → 再次遇到 = 环
+                cycles.append(path + [node])
                 return
-            if visited.get(node, 0) == 2:
+            if visited.get(node) == 2:  # 黑，已完结
                 return
-            visited[node] = 1
-            for neighbor in self.dependencies.get(node, []):
-                dfs(neighbor, path + [node])
-            visited[node] = 2
+            visited[node] = 1  # 灰
+            for nxt in self.dependencies.get(node, []):
+                dfs(nxt, path + [node])
+            visited[node] = 2  # 黑
             order.append(node)
 
-        for key in sorted(self.dependencies):
-            if visited.get(key, 0) == 0:
-                dfs(key, [])
+        for k in sorted(self.dependencies):
+            if visited.get(k, 0) == 0:
+                dfs(k, [])
 
-        if has_cycle:
-            cycles = [" -> ".join(c) for c in has_cycle]
-            raise ValueError("Cycle(s) detected in variable references:\n" + "\n".join(cycles))
+        if cycles:
+            readable = [" -> ".join(c) for c in cycles]
+            raise ValueError("Cycle(s) detected in variable references: " + str(readable))
 
-        # 不再 reverse，保持依赖先解析
-        return order
-
-    def add_variable(self, key: str, value: Any):
-        if not isinstance(key, str):
-            raise TypeError("Key must be a string")
-        self.flat_config[key] = value
-        self.dependencies = self._extract_dependencies()
-        return self.parse()
+        return order  # 依赖节点排在前面，已满足解析顺序  # 依赖节点排在前面，已满足解析顺序
